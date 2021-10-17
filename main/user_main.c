@@ -402,6 +402,14 @@ wsprTransmitter(void *arg)
     /* init I2C port 0 */
     i2c_master_init();
 
+    /*
+     * WARNING: a lot of Chinese SI5351 boards are using a 25MHz crystal.
+     * If i2cdetect (see idf-esp i2c example code) is able to find the device
+     * but your radio stays silent, you most likely have to change this line
+     *
+     */
+    //si5351_init(SI5351_CRYSTAL_LOAD_10PF, 25000000, 175310);
+
     si5351_init(SI5351_CRYSTAL_LOAD_10PF, 27000000, 175310);
     si5351_start(SI5351_CLK0, txFreq);
     si5351_output_enable(SI5351_CLK0, 0);
