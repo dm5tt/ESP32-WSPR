@@ -404,6 +404,7 @@ wsprTransmitter(void *arg)
 
     si5351_init(SI5351_CRYSTAL_LOAD_10PF, 27000000, 175310);
     si5351_start(SI5351_CLK0, txFreq);
+    si5351_output_enable(SI5351_CLK0, 0);
 
     (void) get_wspr_channel_symbols("<K6JQ> CM88WE 10", syms);
 
