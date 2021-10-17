@@ -10,6 +10,7 @@
 /*
 
 Copyright (c) 2018 Dana H. Myers, K6JQ
+Copyright (c) 2021 Holger Adams, DM5TT
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
