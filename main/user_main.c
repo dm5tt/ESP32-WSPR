@@ -49,7 +49,6 @@ SOFTWARE.
 #include "esp_err.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
-#include "esp_event_loop.h"
 #include "esp_system.h"
 #include "esp_spi_flash.h"
 #include "esp_log.h"
@@ -81,37 +80,40 @@ static const char *TAG = "main";
  *      SDA to ESP32 GPIO18
  */
 
-#define I2C_EXAMPLE_MASTER_SCL_IO	19
-#define I2C_EXAMPLE_MASTER_SDA_IO	18
+#define I2C_EXAMPLE_MASTER_SCL_IO	22
+#define I2C_EXAMPLE_MASTER_SDA_IO	21
 
 /*
  * Set the WiFi info
  */
-#define EXAMPLE_WIFI_SSID "Pelosi2019"
-#define EXAMPLE_WIFI_PASS "ImpeachTheBums"
+#define EXAMPLE_WIFI_SSID "es-router"
+#define EXAMPLE_WIFI_PASS "sicher73728esslingen!!"
 
 /*
  * FreeRTOS event group to signal when we are connected & ready to
  * make a request
  */
-static EventGroupHandle_t wifi_event_group;
+static EventGroupHandle_t s_wifi_event_group;
 
 /*
  * The event group allows multiple bits for each event, but we
  * only care about one event - are we connected to the AP with
  * an IP?
  */
-const int CONNECTED_BIT = BIT0;
+#define WIFI_CONNECTED_BIT BIT0
+#define WIFI_FAIL_BIT      BIT1
 
 #define EXAMPLE_ESP_MAXIMUM_RETRY  100
 
 #define TIME_RETRY_COUNT    10
 
+static int s_retry_num = 0;
+
 static void obtain_time(void);
 static void initialize_sntp(void);
 static void initialise_wifi(void);
-static esp_err_t event_handler(void *ctx, system_event_t *event);
-
+static void event_handler(void* arg, esp_event_base_t event_base,
+                        int32_t event_id, void* event_data);
 /*
  *
  */
@@ -122,14 +124,15 @@ obtain_time(void)
     time_t now = 0;
     struct tm timeinfo = { 0 };
 
-    ESP_ERROR_CHECK( nvs_flash_init() );
+
     initialise_wifi();
 
     /*
      * Wait for WiFi connected event
      */
-    xEventGroupWaitBits(wifi_event_group, CONNECTED_BIT,
+    xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT,
                         false, true, portMAX_DELAY);
+
     initialize_sntp();
 
     // wait for time to be set
@@ -163,49 +166,104 @@ initialize_sntp(void)
 static void
 initialise_wifi(void)
 {
-    tcpip_adapter_init();
-    wifi_event_group = xEventGroupCreate();
-    ESP_ERROR_CHECK( esp_event_loop_init(event_handler, NULL) );
+    //Initialize NVS
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+      ESP_ERROR_CHECK(nvs_flash_erase());
+      ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+
+    ESP_ERROR_CHECK(esp_netif_init());
+
+    esp_wifi_set_ps(WIFI_PS_NONE);
+
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK( esp_wifi_init(&cfg) );
-    ESP_ERROR_CHECK( esp_wifi_set_storage(WIFI_STORAGE_RAM) );
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    esp_event_handler_instance_t instance_any_id;
+    esp_event_handler_instance_t instance_got_ip;
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
+                                                        ESP_EVENT_ANY_ID,
+                                                        &event_handler,
+                                                        NULL,
+                                                        &instance_any_id));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+                                                        IP_EVENT_STA_GOT_IP,
+                                                        &event_handler,
+                                                        NULL,
+                                                        &instance_got_ip));
+
     wifi_config_t wifi_config = {
         .sta = {
             .ssid = EXAMPLE_WIFI_SSID,
             .password = EXAMPLE_WIFI_PASS,
+            /* Setting a password implies station will connect to all security modes including WEP/WPA.
+             * However these modes are deprecated and not advisable to be used. Incase your Access point
+             * doesn't support WPA2, these mode can be enabled by commenting below line */
+         .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+
+            .pmf_cfg = {
+                .capable = true,
+                .required = false
+            },
         },
     };
-    ESP_LOGI(TAG, "Setting WiFi configuration SSID %s...", wifi_config.sta.ssid);
-    ESP_ERROR_CHECK( esp_wifi_set_mode(WIFI_MODE_STA) );
-    ESP_ERROR_CHECK( esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config) );
-    ESP_ERROR_CHECK( esp_wifi_start() );
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA) );
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config) );
+    ESP_ERROR_CHECK(esp_wifi_start() );
+
+    ESP_LOGI(TAG, "wifi_init_sta finished.");
+
+    /* Waiting until either the connection is established (WIFI_CONNECTED_BIT) or connection failed for the maximum
+     * number of re-tries (WIFI_FAIL_BIT). The bits are set by event_handler() (see above) */
+    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
+            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+            pdFALSE,
+            pdFALSE,
+            portMAX_DELAY);
+
+    /* xEventGroupWaitBits() returns the bits before the call returned, hence we can test which event actually
+     * happened. */
+    if (bits & WIFI_CONNECTED_BIT) {
+        ESP_LOGI(TAG, "connected to ap SSID:%s password:%s",
+                 EXAMPLE_WIFI_SSID, EXAMPLE_WIFI_PASS);
+    } else if (bits & WIFI_FAIL_BIT) {
+        ESP_LOGI(TAG, "Failed to connect to SSID:%s, password:%s",
+                 EXAMPLE_WIFI_SSID, EXAMPLE_WIFI_PASS);
+    } else {
+        ESP_LOGE(TAG, "UNEXPECTED EVENT");
+    }
 }
 
 /*
  *
  */
-static esp_err_t
-event_handler(void *ctx, system_event_t *event)
+static void
+event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
 {
-    switch(event->event_id) {
-    case SYSTEM_EVENT_STA_START:
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
-        break;
-    case SYSTEM_EVENT_STA_GOT_IP:
-        xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
-        break;
-    case SYSTEM_EVENT_STA_DISCONNECTED:
-        /* This is a workaround as ESP32 WiFi libs don't currently
-           auto-reassociate. */
-        esp_wifi_connect();
-        xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
-        break;
-    default:
-        break;
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (s_retry_num < EXAMPLE_ESP_MAXIMUM_RETRY) {
+            esp_wifi_connect();
+            s_retry_num++;
+            ESP_LOGI(TAG, "retry to connect to the AP");
+        } else {
+            xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+        }
+        ESP_LOGI(TAG,"connect to the AP fail");
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
+        s_retry_num = 0;
+        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     }
-    return ESP_OK;
 }
-
 
 /**
  * @brief i2c master initialization
@@ -213,15 +271,16 @@ event_handler(void *ctx, system_event_t *event)
 static esp_err_t
 i2c_master_init()
 {
-    int i2c_master_port = I2C_NUM_1;
+    int i2c_master_port = I2C_NUM_0;
     i2c_config_t conf;
 
     conf.mode = I2C_MODE_MASTER;
     conf.sda_io_num = I2C_EXAMPLE_MASTER_SDA_IO;
-    conf.sda_pullup_en = 0;
+    conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
     conf.scl_io_num = I2C_EXAMPLE_MASTER_SCL_IO;
-    conf.scl_pullup_en = 0;
-    conf.master.clk_speed = 400000;
+    conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
+    conf.clk_flags = 0;
+    conf.master.clk_speed = 100000;
 
     ESP_ERROR_CHECK(i2c_driver_install(i2c_master_port, conf.mode, 0, 0, 0));
     ESP_ERROR_CHECK(i2c_param_config(i2c_master_port, &conf));
@@ -244,7 +303,7 @@ si5351_write_xfer(uint8_t reg, uint8_t *data, int count)
     i2c_master_write(cmd, data, count, true);
     i2c_master_stop(cmd);
 
-    ret = i2c_master_cmd_begin(I2C_NUM_1, cmd, 1000 / portTICK_RATE_MS);
+    ret = i2c_master_cmd_begin(I2C_NUM_0, cmd, 1000 / portTICK_RATE_MS);
     i2c_cmd_link_delete(cmd);
     return (ret);
 }
@@ -261,7 +320,7 @@ si5351_read_xfer(uint8_t reg, uint8_t *data, int count)
     i2c_master_write_byte(cmd, reg, 1);
     i2c_master_stop(cmd);
 
-    ret = i2c_master_cmd_begin(I2C_NUM_1, cmd, 1000 / portTICK_PERIOD_MS);
+    ret = i2c_master_cmd_begin(I2C_NUM_0, cmd, 1000 / portTICK_PERIOD_MS);
     i2c_cmd_link_delete(cmd);
     if (ret != ESP_OK) {
 	return (ret);
@@ -274,7 +333,7 @@ si5351_read_xfer(uint8_t reg, uint8_t *data, int count)
     i2c_master_read(cmd, data, count, 2);
     i2c_master_stop(cmd);
 
-    ret = i2c_master_cmd_begin(I2C_NUM_1, cmd, 1000 / portTICK_PERIOD_MS);
+    ret = i2c_master_cmd_begin(I2C_NUM_0, cmd, 1000 / portTICK_PERIOD_MS);
     i2c_cmd_link_delete(cmd);
     return (ret);
 }
@@ -391,21 +450,21 @@ wsprTransmitter(void *arg)
      */
 }
 
-void app_main(void)
-{
-    time_t now;
-    struct tm timeinfo;
+void app_main(void) {
+	s_wifi_event_group = xEventGroupCreate();
+	time_t now;
+	struct tm timeinfo;
 
-    /* get the current time */
-    time(&now);
-    gmtime_r(&now, &timeinfo);
-    
-    // Is time set? If not, tm_year will be (1970 - 1900).
-    if (timeinfo.tm_year < (2016 - 1900)) {
-        obtain_time();
-    }
+	/* get the current time */
+	time(&now);
+	gmtime_r(&now, &timeinfo);
 
-    //start WSPR transmitter task
-    // XXX: check priority, use proper define
-    xTaskCreate(wsprTransmitter, "WSPR", 2048, NULL, 10, &wsprTaskHandle);
+	// Is time set? If not, tm_year will be (1970 - 1900).
+	if (timeinfo.tm_year < (2016 - 1900)) {
+		obtain_time();
+	}
+
+	//start WSPR transmitter task
+	// XXX: check priority, use proper define
+	xTaskCreate(wsprTransmitter, "WSPR", 2048, NULL, 10, &wsprTaskHandle);
 }
