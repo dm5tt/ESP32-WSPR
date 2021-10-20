@@ -403,9 +403,17 @@ wsprTransmitter(void *arg)
     i2c_master_init();
 
     /*
-     * WARNING: a lot of Chinese SI5351 boards are using a 25MHz crystal.
+     * WARNING:
+     * A a lot of Chinese SI5351 boards are using a 25MHz crystal.
      * If i2cdetect (see idf-esp i2c example code) is able to find the device
-     * but your radio stays silent, you most likely have to change this line
+     * but your radio stays silent, you most likely have to change this line.
+     *
+     * Also the correction factor of your crystal (in PPM) is an important (third
+     * parameter of si5351_init(...) function. You only have to measure this once
+     * as the device itself is introducing 0PPM itself.
+     *
+     * Easiest way to measure this is to 0 the offset and then sending a constant,
+     * filtered CW into a frequency counter.
      *
      */
     //si5351_init(SI5351_CRYSTAL_LOAD_10PF, 25000000, 175310);
